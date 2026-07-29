@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PSU Live Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      padding: 24px;
+      gap: 20px;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      color: #94a3b8;
+      text-transform: uppercase;
+    }
+
+    h1 span { color: #38bdf8; }
+
+    /* Status bar */
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 0.8rem;
+      color: #64748b;
+    }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #ef4444;
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .dot.live { background: #22c55e; animation: pulse 1.5s infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    /* KPI cards */
+    .kpi-row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .kpi {
+      background: #1e2433;
+      border: 1px solid #2d3748;
+      border-radius: 10px;
+      padding: 16px 24px;
+      min-width: 160px;
+      flex: 1;
+    }
+    .kpi-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #64748b;
+      margin-bottom: 6px;
+    }
+    .kpi-value {
+      font-size: 2rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+    }
+    .kpi-unit {
+      font-size: 0.9rem;
+      font-weight: 400;
+      color: #94a3b8;
+      margin-left: 4px;
+    }
+    .kpi.voltage .kpi-value { color: #38bdf8; }
+    .kpi.current .kpi-value { color: #f97316; }
+    .kpi.samples .kpi-value { color: #a78bfa; font-size: 1.6rem; }
+
+    /* Chart container */
+    .chart-card {
+      background: #1e2433;
+      border: 1px solid #2d3748;
+      border-radius: 10px;
+      padding: 20px;
+      flex: 1;
+      min-height: 320px;
+      position: relative;
+    }
+    .chart-title {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #64748b;
+      margin-bottom: 14px;
+    }
+    .charts-row {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* Log tail */
+    .log-card {
+      background: #1e2433;
+      border: 1px solid #2d3748;
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .log-title {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #64748b;
+      margin-bottom: 10px;
+    }
+    #log {
+      font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      font-size: 0.78rem;
+      color: #94a3b8;
+      height: 140px;
+      overflow-y: auto;
+      line-height: 1.6;
+    }
+    #log .ts   { color: #475569; }
+    #log .ch-v { color: #38bdf8; }
+    #log .ch-i { color: #f97316; }
+    #log .val  { color: #e2e8f0; font-weight: 600; }
+  </style>
+</head>
+<body>
+
+  <h1>PSU Live <span>Dashboard</span></h1>
+
+  <div class="status-bar">
+    <div class="dot" id="dot"></div>
+    <span id="status-text">Connecting to http://localhost:8765/data …</span>
+  </div>
+
+  <div class="kpi-row">
+    <div class="kpi voltage">
+      <div class="kpi-label">Voltage</div>
+      <div class="kpi-value" id="kpi-v">—<span class="kpi-unit">V</span></div>
+    </div>
+    <div class="kpi current">
+      <div class="kpi-label">Current</div>
+      <div class="kpi-value" id="kpi-i">—<span class="kpi-unit">A</span></div>
+    </div>
+    <div class="kpi samples">
+      <div class="kpi-label">Samples</div>
+      <div class="kpi-value" id="kpi-n">0</div>
+    </div>
+  </div>
+
+  <div class="charts-row">
+    <div class="chart-card">
+      <div class="chart-title">Voltage (V)</div>
+      <canvas id="chart-v"></canvas>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Current (A)</div>
+      <canvas id="chart-i"></canvas>
+    </div>
+  </div>
+
+  <div class="log-card">
+    <div class="log-title">Raw JSONL stream (last entries)</div>
+    <div id="log"></div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script>
+  // ── Chart setup ─────────────────────────────────────────────────────────────
+
+  const MAX_POINTS = 120;  // rolling window
+
+  function makeChart(canvasId, label, color) {
+    const ctx = document.getElementById(canvasId).getContext('2d');
+    return new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label,
+          data: [],
+          borderColor: color,
+          backgroundColor: color + '18',
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.3,
+          fill: true,
+        }]
+      },
+      options: {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: true,
+        aspectRatio: 4,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            mode: 'index',
+            intersect: false,
+            backgroundColor: '#1e2433',
+            borderColor: '#2d3748',
+            borderWidth: 1,
+            titleColor: '#94a3b8',
+            bodyColor: color,
+          }
+        },
+        scales: {
+          x: {
+            ticks: { color: '#475569', maxTicksLimit: 8, maxRotation: 0 },
+            grid:  { color: '#1e2433' },
+          },
+          y: {
+            ticks: { color: '#475569' },
+            grid:  { color: '#2d3748' },
+          }
+        }
+      }
+    });
+  }
+
+  const chartV = makeChart('chart-v', 'Voltage (V)', '#38bdf8');
+  const chartI = makeChart('chart-i', 'Current (A)', '#f97316');
+
+  function pushPoint(chart, label, value) {
+    chart.data.labels.push(label);
+    chart.data.datasets[0].data.push(value);
+    if (chart.data.labels.length > MAX_POINTS) {
+      chart.data.labels.shift();
+      chart.data.datasets[0].data.shift();
+    }
+    chart.update('none');
+  }
+
+  // ── State ────────────────────────────────────────────────────────────────────
+
+  let linesProcessed = 0;
+  let sampleCount    = 0;
+  let lastV = null, lastI = null;
+
+  const dot        = document.getElementById('dot');
+  const statusText = document.getElementById('status-text');
+  const logEl      = document.getElementById('log');
+
+  // ── JSONL parser ─────────────────────────────────────────────────────────────
+
+  /**
+   * A Measurement JSONL line looks like:
+   * {"channel_data":{"bench_psu.ch1.voltage":[5.0]},"timestamps":[1234567890000000000],"tags":null}
+   */
+  function processLine(line) {
+    line = line.trim();
+    if (!line) return;
+
+    let obj;
+    try { obj = JSON.parse(line); } catch { return; }
+
+    // Must have channel_data and timestamps
+    if (!obj.channel_data || !obj.timestamps) return;
+
+    const tsNs  = obj.timestamps[obj.timestamps.length - 1];
+    const tsSec = tsNs / 1e9;
+    const label = new Date(tsSec * 1000).toLocaleTimeString('en-GB', {
+      hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+      fractionalSecondDigits: 1
+    });
+
+    for (const [ch, vals] of Object.entries(obj.channel_data)) {
+      const v = vals[vals.length - 1];
+      const isVoltage = ch.toLowerCase().includes('voltage');
+      const isCurrent = ch.toLowerCase().includes('current');
+
+      if (isVoltage) {
+        lastV = v;
+        pushPoint(chartV, label, v);
+        appendLog(label, ch, v, 'ch-v');
+      } else if (isCurrent) {
+        lastI = v;
+        pushPoint(chartI, label, v);
+        appendLog(label, ch, v, 'ch-i');
+      }
+    }
+
+    sampleCount++;
+  }
+
+  function appendLog(ts, ch, val, cls) {
+    const div = document.createElement('div');
+    div.innerHTML =
+      `<span class="ts">[${ts}]</span>  ` +
+      `<span class="${cls}">${ch}</span>  ` +
+      `<span class="val">${val.toFixed(4)}</span>`;
+    logEl.appendChild(div);
+    // Keep log from growing unbounded
+    while (logEl.children.length > 60) logEl.removeChild(logEl.firstChild);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // ── Polling ──────────────────────────────────────────────────────────────────
+
+  async function poll() {
+    try {
+      const res = await fetch('http://localhost:8765/data');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const text  = await res.text();
+      const lines = text.split('\n');
+
+      // Only process lines we haven't seen yet
+      const newLines = lines.slice(linesProcessed);
+      newLines.forEach(processLine);
+      linesProcessed = lines.filter(l => l.trim()).length;
+
+      // Update KPIs
+      if (lastV !== null) document.getElementById('kpi-v').innerHTML =
+        `${lastV.toFixed(3)}<span class="kpi-unit">V</span>`;
+      if (lastI !== null) document.getElementById('kpi-i').innerHTML =
+        `${lastI.toFixed(4)}<span class="kpi-unit">A</span>`;
+      document.getElementById('kpi-n').textContent = sampleCount;
+
+      dot.classList.add('live');
+      statusText.textContent =
+        `Live — polling http://localhost:8765/data every second`;
+
+    } catch (err) {
+      dot.classList.remove('live');
+      statusText.textContent = `Waiting for logger… (${err.message})`;
+    }
+  }
+
+  // Poll immediately, then every 1 second
+  poll();
+  setInterval(poll, 1000);
+  </script>
+</body>
+</html>

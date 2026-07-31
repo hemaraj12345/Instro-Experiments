@@ -25,10 +25,15 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
+print("STEP 1: Import time, threading, datetime, HTTPServer, BaseHTTPRequestHandler, Path completed")
+
 from instro.psu import InstroPSU
 from instro.psu.drivers import SimulatedPSU
 from instro.lib.publishers.files import FilePublisher
 from instro.lib.types import Measurement, Command
+
+print("STEP 2: Import InstroPSU, SimulatedPSU, FilePublisher, Measurement, Command completed")
+
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -41,7 +46,7 @@ CHANNEL           = 1
 SAMPLE_INTERVAL_S = 0.5                 # seconds between reads
 HTTP_PORT         = 8765
 
-
+print("STEP 3: Created config variables: DATA_DIR, JSONL_FILE_NAME, SET_VOLTAGE, SET_CURRENT_LIMIT, OVP_LEVEL, CHANNEL, SAMPLE_INTERVAL_S, HTTP_PORT")
 # ── Custom console publisher ──────────────────────────────────────────────────
 
 class ConsolePrinter:
@@ -52,6 +57,7 @@ class ConsolePrinter:
     """
 
     def publish(self, data: "Measurement | Command", **kwargs) -> None:
+        print("STEP 4: Starting publish process")
         if isinstance(data, Measurement):
             # Timestamps are nanoseconds since epoch
             ts_ns = data.timestamps[-1] if data.timestamps else 0
@@ -71,10 +77,11 @@ class ConsolePrinter:
 # ── HTTP server ───────────────────────────────────────────────────────────────
 
 DASHBOARD_HTML = Path(__file__).parent / "psu_dashboard.html"
-
+print("STEP 5: Created dashboard HTML path")
 
 class DashboardHandler(BaseHTTPRequestHandler):
     """Serves the dashboard HTML and the live JSONL data file."""
+    print("STEP 6: Created dashboard handler")
 
     jsonl_path: Path  # injected before server starts
 
@@ -111,6 +118,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
 def _start_http_server(jsonl_path: Path) -> None:
+    print("STEP 7: Starting HTTP server")
     DashboardHandler.jsonl_path = jsonl_path
     server = HTTPServer(("localhost", HTTP_PORT), DashboardHandler)
     server.serve_forever()
@@ -126,6 +134,7 @@ def main():
     if jsonl_path.exists():
         jsonl_path.unlink()
 
+    print("STEP 4: Starting publish process")
     file_pub    = FilePublisher(directory=DATA_DIR, format="jsonl", custom_file_name=JSONL_FILE_NAME)
     console_pub = ConsolePrinter()
 

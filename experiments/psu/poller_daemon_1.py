@@ -44,6 +44,78 @@ because of how the GIL happens to serialize bytecode, but that's an
 implementation detail, not a contract — Queue is the documented, correct
 tool for producer/consumer handoff between threads.
 """
+"""
+┌─────────────────────────────────────────────────────────────────────┐
+│                  PsuPoller — Two Independent Clocks                 │
+└─────────────────────────────────────────────────────────────────────┘
+
+BACKGROUND THREAD (daemon=True)              MAIN THREAD
+  runs _poll_loop()                            runs your demo loop
+  tick = POLL_INTERVAL_S = 0.5s                 tick = MAIN_WORK_INTERVAL_S = 2.0s
+
+  t=0.0s ─ read PSU ─ put(sample_0) ──┐
+  t=0.5s ─ read PSU ─ put(sample_1) ──┤
+  t=1.0s ─ read PSU ─ put(sample_2) ──┼──►  [queue: 4 samples waiting]
+  t=1.5s ─ read PSU ─ put(sample_3) ──┘            │
+                                                    ▼
+                                        t=2.0s ─ "do other work" (sleep)
+                                                 then DRAIN queue:
+                                                   get() → sample_0
+                                                   get() → sample_1
+                                                   get() → sample_2
+                                                   get() → sample_3
+                                                 print "drained 4 samples"
+
+  t=2.0s ─ read PSU ─ put(sample_4) ──┐
+  t=2.5s ─ read PSU ─ put(sample_5) ──┤
+  t=3.0s ─ read PSU ─ put(sample_6) ──┼──►  [queue filling again]
+  t=3.5s ─ read PSU ─ put(sample_7) ──┘            │
+                                                    ▼
+                                        t=4.0s ─ drain again → 4 more samples
+                                        ...repeats...
+
+  Ratio: MAIN_WORK_INTERVAL_S / POLL_INTERVAL_S = 2.0 / 0.5 = 4
+  → main thread drains ~4 samples per cycle, proving both clocks
+    run independently.
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    start() / stop() Control Flow                    │
+└─────────────────────────────────────────────────────────────────────┘
+
+  MAIN THREAD                          BACKGROUND THREAD
+  ────────────                         ──────────────────
+  poller.start()
+    │
+    ├─ _stop_event.clear()
+    └─ Thread(target=_poll_loop,
+              daemon=True).start() ───►  _poll_loop() begins
+                                           │
+                                           ▼
+                                         while not stop_event.is_set():
+                                           read → put(sample)
+                                           stop_event.wait(POLL_INTERVAL_S)
+                                              │
+                                              │ (loops until stop_event set,
+                                              │  or wakes early if set mid-wait)
+                                              ▼
+  poller.stop()
+    │
+    ├─ _stop_event.set() ───────────────►  wait() returns EARLY
+    │                                       loop condition fails → exits
+    └─ _thread.join(
+         timeout=JOIN_TIMEOUT_S) ◄──────  thread exits, join() returns
+         │
+         ▼
+    "poller stopped" printed
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│  KEY INSIGHT: JOIN_TIMEOUT_S is a SAFETY CEILING on stop(), not a    │
+│  operating interval like the other two. It only matters if the      │
+│  background thread is slow to exit (e.g. stuck on a slow PSU read). │
+└─────────────────────────────────────────────────────────────────────┘
+"""
 
 import queue
 import threading
@@ -51,15 +123,33 @@ import time
 
 from instro.psu import InstroPSU
 from instro.psu.drivers import SimulatedPSU
+print("STEP 1: Import queue, threading, time, InstroPSU, SimulatedPSU completed")
 
 VISA_RESOURCE = "TCPIP0::127.0.0.1::5025::SOCKET"
 SET_VOLTAGE = 5.0
 SET_CURRENT = 1.0
 CHANNEL = 1
 
-POLL_INTERVAL_S = 0.5       # how often the background thread reads the PSU
-MAIN_WORK_INTERVAL_S = 2.0  # how often the main thread does its "other work"
+print("STEP 2: Created VISA_RESOURCE for the simulated PSU , SET_VOLTAGE, SET_CURRENT, CHANNEL variables completed")
+
+POLL_INTERVAL_S = 0.05       # how often the background thread reads the PSU, every 0.5s,
+#the loop wakes up, takes a reading, puts it on the queue, then waits again. 
+# Lower this and you get more samples per second (faster acquisition); 
+# raise it and you get fewer, slower samples.
+
+MAIN_WORK_INTERVAL_S = 3.0  # how often the main thread does its "other work" This constant just controls the demo pacing — 
+#it's simulating "the main thread is busy doing something else" 
+# so you can watch samples accumulate in the queue between drains. In a real script, 
+# this wouldn't be a sleep — it'd be whatever actual work your main thread does (control logic, UI updates, etc.).
+
 JOIN_TIMEOUT_S = 2.0
+
+""" When you call stop(), it sets the stop event and then waits up to this long for the background thread to actually 
+finish its current loop iteration and exit cleanly. It's a safety ceiling — if the thread doesn't exit within 2 seconds 
+(e.g., it's stuck on a slow PSU read), join() gives up waiting rather than hanging your program forever, though the thread 
+itself will still be a daemon and get killed when the process exits"""
+
+print("STEP 3: Created POLL_INTERVAL_S, MAIN_WORK_INTERVAL_S, JOIN_TIMEOUT_S variables completed")
 
 
 def poll_loop(psu: InstroPSU, sample_queue: "queue.Queue", stop_event: threading.Event) -> None:
@@ -78,6 +168,7 @@ def poll_loop(psu: InstroPSU, sample_queue: "queue.Queue", stop_event: threading
         # stop_event.set() is called elsewhere — see docstring above.
         stop_event.wait(POLL_INTERVAL_S)
 
+print("STEP 4: Created poll_loop function completed")
 
 def drain_queue(sample_queue: "queue.Queue") -> list[dict]:
     """Pulls everything currently queued without blocking the caller."""
@@ -88,7 +179,7 @@ def drain_queue(sample_queue: "queue.Queue") -> list[dict]:
         except queue.Empty:
             break
     return samples
-
+print("STEP 5: Created drain_queue function completed")
 
 def main() -> None:
     sample_queue: "queue.Queue[dict]" = queue.Queue()
@@ -110,7 +201,7 @@ def main() -> None:
             name="psu-poller",
         )
         poller.start()
-
+        print("STEP 6: Poller thread started, running in the background")
         print("Poller running in the background. Main thread doing its own work.")
         print("Press Ctrl+C to stop.\n")
 
